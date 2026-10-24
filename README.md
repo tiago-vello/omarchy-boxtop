@@ -2,9 +2,12 @@
 
 A lightweight system monitor for the [Omarchy](https://omarchy.org) Quattro bar.
 Click the chip icon to open a **liquid-glass** popup card inspired by
-[btop](https://github.com/aristocratos/btop): CPU, memory, network and a live
-process list in frosted glass boxes, with five glass styles, wallpaper-matched
+[btop](https://github.com/aristocratos/btop): CPU, memory, GPU, network and a
+live process list in frosted glass boxes, with five glass styles, wallpaper-matched
 accents and a built-in updater.
+
+> This is a fork of [Maftuuh1922/omarchy-boxtop](https://github.com/Maftuuh1922/omarchy-boxtop)
+> that adds a **gpu** box. Everything else follows upstream.
 
 <p align="center">
   <picture>
@@ -19,6 +22,13 @@ accents and a built-in updater.
 - **cpu** — per-core meters, temperature, frequency, CPU model, dot-matrix
   usage history, uptime and load average
 - **mem** — RAM history graph plus Used / Cached / Swap / Disk meters
+- **gpu** — usage history graph plus Util / VRAM / Power / Fan meters, GPU
+  name, clock, temperature and power limit. NVIDIA is read through NVML (the
+  `libnvidia-ml` library that ships with the driver, no `nvidia-smi` process per
+  tick), AMD and Intel through `/sys/class/drm` and hwmon. Intel GPUs show clock,
+  temperature and power only (their busy counter needs perf). Extra GPUs get one
+  row each. A powered-down laptop dGPU is shown as asleep and never polled, so
+  opening the card doesn't wake it. The box hides itself on machines without a GPU
 - **net** — live down / up rates (bytes or bits), totals and a peak-scaled chart
 - **proc** — top processes by live CPU %, with PID and memory
 - **Liquid glass** — translucent card, boxes, chips, sliders and bar pill with
@@ -82,16 +92,12 @@ it is on.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/Maftuuh1922/omarchy-boxtop.git --enable
+omarchy plugin add https://github.com/tiago-vello/omarchy-boxtop.git --enable
 ```
 
-Or install a release archive by hand:
-
-```sh
-curl -L https://github.com/Maftuuh1922/omarchy-boxtop/releases/latest/download/maftuuh.boxtop.tar.gz \
-  | tar -xz -C ~/.config/omarchy/plugins/
-omarchy plugin enable maftuuh.boxtop
-```
+The fork keeps the plugin id `maftuuh.boxtop`, so it replaces an upstream
+install in place and keeps your settings (remove the upstream copy first with
+`omarchy plugin remove maftuuh.boxtop`). The built-in updater follows this fork.
 
 Move it somewhere else on the bar if you like:
 
@@ -211,8 +217,8 @@ Click **⚙** in the card. Settings are grouped in tabs and apply live:
 | `graph` | `dots`, `bars`, `line` | `dots` | History graph style |
 | `layout` | `portrait`, `landscape` | `portrait` | Card orientation |
 | `popupPos` | `icon`, `center` | `icon` | Card under the bar icon or centred on the bar |
-| `boxes` | any of `cpu`, `mem`, `net`, `proc` | all | Which boxes are shown |
-| `order` | list of box names | `cpu, mem, net, proc` | Box order (also drag & drop the box titles) |
+| `boxes` | any of `cpu`, `mem`, `gpu`, `net`, `proc` | all | Which boxes are shown |
+| `order` | list of box names | `cpu, mem, gpu, net, proc` | Box order (also drag & drop the box titles) |
 | `compact` | `true`, `false` | `false` | Tighter rows and graphs |
 | `textSize` | `normal`, `small`, `tiny` | `normal` | Scale box text down |
 | `stroke` | `true`, `false` | `false` | btop outlines instead of glass boxes |

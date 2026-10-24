@@ -23,6 +23,10 @@ Panel {
   property var ramHistory: []
   property var netHistory: []
   property var netUpHistory: []
+  property var gpuHistory: []
+  // The gpu box stays hidden until a sample has reported a GPU.
+  property bool hasGpu: false
+  property string gpuId: ""
   property real netRxRate: 0
   property real netTxRate: 0
   property real netPeak: 8192   // bytes/s, shared scale for both series
@@ -40,7 +44,7 @@ Panel {
   // ── Settings (stored on this widget's entry in ~/.config/omarchy/shell.json) ──
   readonly property var presetNames: ["theme", "btop", "catppuccin", "nord", "mono"]
   readonly property var graphStyles: ["dots", "bars", "line"]
-  readonly property var boxNames: ["cpu", "mem", "net", "proc"]
+  readonly property var boxNames: ["cpu", "mem", "gpu", "net", "proc"]
 
   function opt(key, def) {
     var v = root.settings ? root.settings[key] : undefined
@@ -528,6 +532,8 @@ Panel {
     return out.length ? out : boxNames
   }
   function showBox(name) { return root.boxes.indexOf(name) >= 0 }
+  // Shown and has something to show (no GPU on this machine = no gpu box).
+  function boxVisible(name) { return showBox(name) && (name !== "gpu" || root.hasGpu) }
 
   // btop numbers its tabs by position, so the superscript follows the order
   // (and skips boxes that are switched off).
@@ -535,7 +541,7 @@ Panel {
     var sup = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"]
     var n = 0
     for (var i = 0; i < order.length; i++) {
-      if (!showBox(order[i])) continue
+      if (!boxVisible(order[i])) continue
       n++
       if (order[i] === key) return sup[Math.min(n, 9)] + key
     }
@@ -646,7 +652,8 @@ Panel {
     var cur = root.boxes.slice()
     var i = cur.indexOf(name)
     if (i >= 0) {
-      if (cur.length === 1) return
+      // Keep at least one box that is really on screen (gpu may be hidden).
+      if (cur.filter(function(k) { return k !== name && root.boxVisible(k) }).length === 0) return
       cur.splice(i, 1)
     } else {
       cur.push(name)
@@ -825,7 +832,7 @@ Panel {
         orange: tc("orange", tc("bright_red", "#fab387"))
       }
       return {
-        cpu: String(acc), mem: t.green, net: t.red, proc: t.blue,
+        cpu: String(acc), mem: t.green, gpu: t.yellow, net: t.red, proc: t.blue,
         core: [t.cyan, t.blue, t.magenta], graph: [t.green, t.yellow, t.red],
         used: [t.green, t.cyan, t.blue], cached: [t.blue, t.cyan, t.magenta],
         swap: [t.magenta, t.blue, t.cyan], disk: [t.yellow, t.orange, t.red],
@@ -833,14 +840,14 @@ Panel {
       }
     }
     if (preset === "catppuccin") return {
-      cpu: "#cba6f7", mem: "#a6e3a1", net: "#f38ba8", proc: "#89b4fa",
+      cpu: "#cba6f7", mem: "#a6e3a1", gpu: "#fab387", net: "#f38ba8", proc: "#89b4fa",
       core: ["#94e2d5", "#89b4fa", "#cba6f7"], graph: ["#a6e3a1", "#f9e2af", "#f38ba8"],
       used: ["#a6e3a1", "#94e2d5", "#89b4fa"], cached: ["#89b4fa", "#94e2d5", "#cba6f7"],
       swap: ["#f5c2e7", "#cba6f7", "#89b4fa"], disk: ["#f9e2af", "#fab387", "#f38ba8"],
       down: "#fab387", up: "#a6e3a1"
     }
     if (preset === "nord") return {
-      cpu: "#b48ead", mem: "#a3be8c", net: "#bf616a", proc: "#88c0d0",
+      cpu: "#b48ead", mem: "#a3be8c", gpu: "#ebcb8b", net: "#bf616a", proc: "#88c0d0",
       core: ["#8fbcbb", "#88c0d0", "#b48ead"], graph: ["#a3be8c", "#ebcb8b", "#bf616a"],
       used: ["#a3be8c", "#8fbcbb", "#88c0d0"], cached: ["#88c0d0", "#81a1c1", "#b48ead"],
       swap: ["#b48ead", "#81a1c1", "#88c0d0"], disk: ["#ebcb8b", "#d08770", "#bf616a"],
@@ -851,14 +858,14 @@ Panel {
       acc = root.fg
       var g = [Util.alpha(acc, 0.4), Util.alpha(acc, 0.7), acc]
       return {
-        cpu: acc, mem: acc, net: acc, proc: acc,
+        cpu: acc, mem: acc, gpu: acc, net: acc, proc: acc,
         core: g, graph: g, used: g, cached: g, swap: g, disk: g,
         down: acc, up: acc
       }
     }
     // btop (gruvbox material, matches btop's default-ish look)
     return {
-      cpu: "#d3869b", mem: "#a9b665", net: "#ea6962", proc: "#7daea3",
+      cpu: "#d3869b", mem: "#a9b665", gpu: "#d8a657", net: "#ea6962", proc: "#7daea3",
       core: ["#89b482", "#7daea3", "#d3869b"], graph: ["#89b482", "#d8a657", "#ea6962"],
       used: ["#a9b665", "#89b482", "#7daea3"], cached: ["#7daea3", "#89b482", "#d3869b"],
       swap: ["#d3869b", "#7daea3", "#89b482"], disk: ["#d8a657", "#e78a4e", "#ea6962"],
@@ -1009,6 +1016,7 @@ Panel {
   function repaintGraphs() {
     cpuGraph.repaintAll()
     memGraph.repaintAll()
+    gpuGraph.repaintAll()
   }
 
   Component.onCompleted: {
@@ -1016,6 +1024,7 @@ Panel {
     for (var i = 0; i < root.historyLen; i++) init.push(0.02)
     root.cpuHistory = init
     root.ramHistory = init.slice()
+    root.gpuHistory = init.slice()
     var z = []
     for (var j = 0; j < root.historyLen; j++) z.push(0)
     root.netHistory = z
@@ -1082,6 +1091,21 @@ Panel {
     stats = d
     cpuHistory = push(cpuHistory, d.cpu / 100)
     ramHistory = push(ramHistory, d.ram_pct / 100)
+    if (d.gpus && d.gpus.length) {
+      root.hasGpu = true
+      var g0 = d.gpus[0]
+      // gpus[0] can switch device (a laptop dGPU going to sleep): start a
+      // fresh graph rather than splicing two GPUs' series together.
+      if (g0.id !== root.gpuId) {
+        if (root.gpuId !== "") {
+          var z0 = []
+          for (var k = 0; k < root.historyLen; k++) z0.push(0.02)
+          gpuHistory = z0
+        }
+        root.gpuId = String(g0.id || "")
+      }
+      gpuHistory = push(gpuHistory, typeof g0.util === "number" ? g0.util / 100 : 0)
+    }
 
     // Traffic rates from the cumulative interface counters, divided by the
     // real elapsed time so a card reopen doesn't spike the chart.
@@ -1122,6 +1146,30 @@ Panel {
   }
 
   function fmtG(v) { return (Math.round(v * 10) / 10).toFixed(1) }
+
+  // ── GPU: the busiest-capable GPU in full, any others as one row each ──
+  readonly property var gpu: root.stats && root.stats.gpus && root.stats.gpus.length ? root.stats.gpus[0] : null
+  readonly property var gpuRows: {
+    var g = root.gpu
+    if (!g || g.sleeping) return []
+    var rows = []
+    if (typeof g.util === "number")
+      rows.push({ label: "Util", value: g.util + "%", pct: g.util / 100, stops: root.pal.graph })
+    if (typeof g.mem_used === "number")
+      rows.push({ label: "VRAM", value: root.fmtG(g.mem_used) + "G", pct: (g.mem_pct || 0) / 100, stops: root.pal.used })
+    if (typeof g.power === "number")
+      rows.push({ label: "Power", value: g.power + "W", pct: (g.power_pct || 0) / 100, stops: root.pal.disk })
+    if (typeof g.fan === "number")
+      rows.push({ label: "Fan", value: g.fan + "%", pct: g.fan / 100, stops: root.pal.cached })
+    var all = root.stats.gpus
+    for (var i = 1; i < all.length; i++) {
+      var o = all[i]
+      rows.push({ label: "GPU" + i,
+                  value: o.sleeping ? "asleep" : (typeof o.temp === "number" ? root.fmtTemp(o.temp) : "—"),
+                  pct: typeof o.util === "number" ? o.util / 100 : 0, stops: root.pal.core })
+    }
+    return rows
+  }
 
   // ── btop box frame: rounded/sharp corners, tab title, notches, divider ──
   component BtopBox: Item {
@@ -1496,6 +1544,7 @@ Panel {
       color: root.fg
       font.family: Style.font.family; font.pixelSize: root.fsSmall
       width: 66
+      elide: Text.ElideRight
       horizontalAlignment: Text.AlignRight
       anchors.verticalCenter: parent.verticalCenter
     }
@@ -2886,12 +2935,12 @@ Panel {
             readonly property real colW: cols === 2 ? (width - gap) / 2 : width
             // Greedy placement: each visible box goes to the currently shorter column.
             readonly property var place: {
-              var byKey = { cpu: cpuBoxItem, mem: memBoxItem, net: netBoxItem, proc: procBoxItem }
+              var byKey = { cpu: cpuBoxItem, mem: memBoxItem, gpu: gpuBoxItem, net: netBoxItem, proc: procBoxItem }
               var items = root.order.map(function(k) { return [k, byKey[k]] })
               var colY = [0, 0]
               var last = ["", ""]
               var out = { cpu: { x: 0, y: 0, stretch: 0 }, mem: { x: 0, y: 0, stretch: 0 },
-                          net: { x: 0, y: 0, stretch: 0 }, proc: { x: 0, y: 0, stretch: 0 }, height: 0 }
+                          gpu: { x: 0, y: 0, stretch: 0 }, net: { x: 0, y: 0, stretch: 0 }, proc: { x: 0, y: 0, stretch: 0 }, height: 0 }
               for (var i = 0; i < items.length; i++) {
                 var it = items[i][1]
                 if (!it.visible) continue
@@ -2913,7 +2962,7 @@ Panel {
             height: place.height
 
             function keyAt(px, py, exclude) {
-              var byKey = { cpu: cpuBoxItem, mem: memBoxItem, net: netBoxItem, proc: procBoxItem }
+              var byKey = { cpu: cpuBoxItem, mem: memBoxItem, gpu: gpuBoxItem, net: netBoxItem, proc: procBoxItem }
               for (var k in byKey) {
                 var b = byKey[k]
                 if (k === exclude || !b.visible) continue
@@ -3051,6 +3100,69 @@ Panel {
                   value: root.stats ? (root.stats.disk_used + "G") : ""
                   pct: root.stats ? root.stats.disk_pct / 100 : 0
                   stops: root.pal.disk
+                }
+              }
+            }
+
+            // ═══════════════ GPU BOX ═══════════════
+            BtopBox {
+              id: gpuBoxItem
+              boxKey: "gpu"
+              x: boxArea.place.gpu.x
+              y: boxArea.place.gpu.y
+              width: boxArea.colW
+              visible: root.boxVisible("gpu")
+              readonly property var g: root.gpu
+              readonly property bool asleep: g ? g.sleeping === true : false
+              readonly property int graphH: root.compact ? 24 : 36
+              readonly property int rowH: root.compact ? 12 : 14
+              // A sleeping GPU still gets one line of room for its note.
+              readonly property int nRows: Math.max(1, root.gpuRows.length)
+              height: baseH + boxArea.place.gpu.stretch
+              readonly property bool hasFoot: footLeft.length > 0 || footRight.length > 0
+              readonly property real baseH: 15 + graphH + 13 + nRows * rowH + (nRows - 1) * 3 + (hasFoot ? 4 + 15 : 11)
+              boxColor: root.pal.gpu
+              tag: root.boxTag("gpu")
+              rightText: g ? g.name + (g.clock ? "  " + (g.clock / 1000).toFixed(2) + " GHz" : "") : ""
+              divY: 15 + graphH + 5
+              divLabel: asleep ? "asleep" : "breakdown"
+              footLeft: g && !asleep && typeof g.temp === "number" ? "temp " + root.fmtTemp(g.temp) : ""
+              footRight: g && !asleep && typeof g.power_limit === "number" ? "limit " + g.power_limit + "W" : ""
+
+              GraphView {
+                id: gpuGraph
+                width: parent.width
+                height: gpuBoxItem.graphH
+                history: root.gpuHistory
+              }
+
+              Column {
+                y: gpuBoxItem.graphH + 13
+                width: parent.width
+                spacing: 3
+
+                // Count model (like the proc list), so a new sample updates
+                // the rows in place instead of rebuilding them every tick.
+                Repeater {
+                  model: root.gpuRows.length
+                  MiniBarRow {
+                    required property int index
+                    readonly property var r: root.gpuRows[index] || ({})
+                    label: r.label || ""
+                    value: r.value || ""
+                    pct: r.pct || 0
+                    stops: r.stops || root.pal.used
+                  }
+                }
+                Text {
+                  visible: root.gpuRows.length === 0
+                  height: gpuBoxItem.rowH
+                  text: gpuBoxItem.asleep ? "powered down, not polled so it can stay asleep" : "no readings from this GPU's driver"
+                  color: root.fg; opacity: root.dim(0.6)
+                  font.family: Style.font.family; font.pixelSize: root.fsSmall
+                  width: parent.width
+                  elide: Text.ElideRight
+                  verticalAlignment: Text.AlignVCenter
                 }
               }
             }

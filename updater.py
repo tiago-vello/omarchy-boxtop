@@ -36,7 +36,7 @@ import time
 import urllib.error
 import urllib.request
 
-REPO = "Maftuuh1922/omarchy-boxtop"
+REPO = "tiago-vello/omarchy-boxtop"
 BRANCH = "main"
 PLUGIN_ID = "maftuuh.boxtop"
 API = "https://api.github.com/repos/" + REPO

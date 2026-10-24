@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.6.0 — 2026-10-24
+
+GPU stats (fork: tiago-vello/omarchy-boxtop).
+
+- **gpu box**: usage history graph plus Util / VRAM / Power / Fan meters, the
+  GPU name and clock in the title, temperature and power limit in the footer
+- **NVIDIA** through NVML (`libnvidia-ml`, shipped with the driver) via
+  ctypes: no `nvidia-smi` process per tick and no new dependency
+- **AMD** through `gpu_busy_percent`, `mem_info_vram_*` and hwmon; **Intel**
+  (i915 / xe) shows clock, temperature and power
+- Extra GPUs get one row each; the most capable awake GPU is shown in full
+- A runtime-suspended GPU (a laptop dGPU that is off) is shown as asleep and
+  is never queried, so opening the card doesn't wake it
+- The box hides itself when no GPU is found; `boxes` / `order` accept `gpu`
+- The updater now follows the fork
+
 ## v1.5.1 — 2026-10-11
 
 Security hardening: the settings fields never touch the clipboard.

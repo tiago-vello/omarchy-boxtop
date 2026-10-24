@@ -43,6 +43,96 @@ class SamplerTest(unittest.TestCase):
         self.assertLess(per_tick_ms, 60)  # generous bound for slow CI boxes
 
 
+class GpuTest(unittest.TestCase):
+    """Fake /sys/class/drm trees: AMD readings, sleeping NVIDIA, pci.ids names."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.drm = os.path.join(self.tmp, "drm")
+        os.makedirs(self.drm)
+        ids = os.path.join(self.tmp, "pci.ids")
+        with open(ids, "w") as f:
+            f.write("# comment\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n"
+                    "\t73bf  Navi 21 [Radeon RX 6800/6800 XT / 6900 XT]\n"
+                    "10de  NVIDIA Corporation\n\t2684  AD102 [GeForce RTX 4090]\n")
+        self.pci = os.path.join(self.tmp, "pci")
+        os.makedirs(os.path.join(self.tmp, "drivers", "nvidia"))
+        self.patches = [mock.patch.object(boxtop, "DRM", self.drm),
+                        mock.patch.object(boxtop, "PCI", self.pci),
+                        mock.patch.object(boxtop, "PCI_IDS", (ids,)),
+                        mock.patch.object(boxtop, "_nvml", None),
+                        mock.patch.object(boxtop, "_nvml_retry", 0.0)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def card(self, n, vendor, device, files, status="active", drm=True):
+        dev = os.path.join(self.pci, "0000:0%d:00.0" % n)
+        files = dict(files, vendor=vendor, device=device, **{"class": "0x030000"})
+        files["power/runtime_status"] = status
+        for rel, value in files.items():
+            path = os.path.join(dev, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(str(value) + "\n")
+        if vendor == "0x10de":
+            os.symlink(os.path.join(self.tmp, "drivers", "nvidia"), os.path.join(dev, "driver"))
+        if not drm:
+            return
+        os.makedirs(os.path.join(self.drm, "card%d" % n))
+        os.symlink(dev, os.path.join(self.drm, "card%d" % n, "device"))
+        os.makedirs(os.path.join(self.drm, "card%d-DP-1" % n))  # connectors are skipped
+
+    def test_amd_readings(self):
+        self.card(0, "0x1002", "0x73bf", {
+            "gpu_busy_percent": 37, "mem_info_vram_used": 2 * 2**30, "mem_info_vram_total": 16 * 2**30,
+            "hwmon/hwmon3/temp1_label": "edge", "hwmon/hwmon3/temp1_input": 51000,
+            "hwmon/hwmon3/power1_average": 120500000, "hwmon/hwmon3/power1_cap": 250000000,
+            "hwmon/hwmon3/freq1_input": 2100000000, "hwmon/hwmon3/pwm1": 102,
+        })
+        g = boxtop.find_gpus()[0].sample()
+        self.assertEqual(g["name"], "Navi 21")  # pci.ids can't tell a 6800 from a 6900 XT
+        self.assertEqual((g["util"], g["mem_used"], g["mem_total"], g["mem_pct"]), (37, 2.0, 16.0, 12))
+        self.assertEqual((g["temp"], g["power"], g["power_limit"], g["power_pct"]), (51, 120, 250, 48))
+        self.assertEqual((g["clock"], g["fan"]), (2100, 40))
+
+    def test_sleeping_nvidia_is_never_queried(self):
+        # No DRM node (nvidia_drm not loaded) must still be caught via PCI.
+        for drm in (True, False):
+            shutil.rmtree(self.pci, ignore_errors=True)
+            shutil.rmtree(self.drm, ignore_errors=True)
+            os.makedirs(self.drm)
+            self.card(1, "0x10de", "0x2684", {}, status="suspended", drm=drm)
+            with mock.patch.object(boxtop, "Nvml", side_effect=AssertionError("NVML opened")):
+                gpus = boxtop.find_gpus()
+                self.assertEqual(gpus[0].sample(), {"id": "0000:01:00.0", "name": "RTX 4090",
+                                                    "vendor": "nvidia", "sleeping": True})
+
+    def test_xe_pkg_temperature(self):
+        self.card(2, "0x8086", "0xe20b", {"hwmon/hwmon5/temp2_label": "pkg", "hwmon/hwmon5/temp2_input": 47000,
+                                          "hwmon/hwmon5/temp3_label": "vram", "hwmon/hwmon5/temp3_input": 60000})
+        self.assertEqual(boxtop.find_gpus()[0].sample()["temp"], 47)
+
+    def test_failed_nvml_open_backs_off(self):
+        with mock.patch.object(boxtop, "Nvml", side_effect=OSError("no lib")) as m:
+            boxtop.open_nvml()
+            boxtop.open_nvml()
+            self.assertEqual(m.call_count, 1)
+
+    def test_awake_gpus_sort_first(self):
+        rows = [{"vendor": "nvidia", "sleeping": True}, {"vendor": "intel", "mem_total": None},
+                {"vendor": "amd", "mem_total": 16.0}]
+        self.assertEqual([r["vendor"] for r in sorted(rows, key=boxtop.gpu_sort_key)], ["amd", "intel", "nvidia"])
+
+    def test_no_gpu_is_empty(self):
+        with mock.patch.object(boxtop, "Nvml", side_effect=OSError("no libnvidia-ml")):
+            self.assertEqual(boxtop.find_gpus(), [])
+
+
 class CtlTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -154,15 +244,15 @@ class UpdaterTest(unittest.TestCase):
 
         def fake_rel():
             calls.append(1)
-            return ("v1.6.0", "## v1.6.0\n- **glass** fix\n", "https://example/t.tar.gz")
+            return ("v1.7.0", "## v1.7.0\n- **glass** fix\n", "https://example/t.tar.gz")
         with mock.patch.object(updater, "latest_release", fake_rel):
             a = updater.do_check()
             b = updater.do_check()
         self.assertTrue(a["available"])
-        self.assertEqual(a["latest"], "1.6.0")
+        self.assertEqual(a["latest"], "1.7.0")
         self.assertIn("glass fix", a["notes"])
         self.assertEqual(len(calls), 1, "second check must come from the cache")
-        self.assertEqual(b["latest"], "1.6.0")
+        self.assertEqual(b["latest"], "1.7.0")
 
     def test_check_offline_is_quiet(self):
         def boom():
@@ -184,18 +274,18 @@ class UpdaterTest(unittest.TestCase):
         return buf.getvalue()
 
     def test_apply_tarball_swaps_and_backs_up(self):
-        data = self._tarball("1.6.0")
-        with mock.patch.object(updater, "latest_release", lambda: ("v1.6.0", "", "https://x/t.tgz")), \
+        data = self._tarball("1.7.0")
+        with mock.patch.object(updater, "latest_release", lambda: ("v1.7.0", "", "https://x/t.tgz")), \
                 mock.patch.object(updater, "http_get", lambda *a, **k: data), \
                 mock.patch.object(updater, "is_git", lambda root=None: False):
             res = updater.do_apply()
         self.assertTrue(res["ok"], res)
-        self.assertEqual(updater.local_version(self.inst), "1.6.0")
+        self.assertEqual(updater.local_version(self.inst), "1.7.0")
         self.assertEqual(len(os.listdir(updater.BACKUP_DIR)), 1)
 
     def test_apply_tarball_broken_keeps_old(self):
-        data = self._tarball("1.6.0", broken=True)
-        with mock.patch.object(updater, "latest_release", lambda: ("v1.6.0", "", "https://x/t.tgz")), \
+        data = self._tarball("1.7.0", broken=True)
+        with mock.patch.object(updater, "latest_release", lambda: ("v1.7.0", "", "https://x/t.tgz")), \
                 mock.patch.object(updater, "http_get", lambda *a, **k: data), \
                 mock.patch.object(updater, "is_git", lambda root=None: False):
             res = updater.do_apply()
@@ -215,14 +305,14 @@ class UpdaterTest(unittest.TestCase):
         run("git", "commit", "-qm", "v1.5.0")
         shutil.rmtree(self.inst)
         run("git", "clone", "-q", origin, self.inst, cwd=self.tmp)
-        make_plugin(origin, "1.6.0")
-        run("git", "commit", "-qam", "v1.6.0")
+        make_plugin(origin, "1.7.0")
+        run("git", "commit", "-qam", "v1.7.0")
         with mock.patch.object(updater, "latest_release", lambda: None), \
-                mock.patch.object(updater, "remote_version_file", lambda: "1.6.0"):
+                mock.patch.object(updater, "remote_version_file", lambda: "1.7.0"):
             res = updater.do_apply()
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["method"], "git")
-        self.assertEqual(updater.local_version(self.inst), "1.6.0")
+        self.assertEqual(updater.local_version(self.inst), "1.7.0")
 
         # A broken upstream commit is rolled back.
         os.unlink(os.path.join(origin, "Panel.qml"))
@@ -234,7 +324,7 @@ class UpdaterTest(unittest.TestCase):
             res = updater.do_apply()
         self.assertFalse(res["ok"])
         self.assertTrue(os.path.isfile(os.path.join(self.inst, "Panel.qml")))
-        self.assertEqual(updater.local_version(self.inst), "1.6.0")
+        self.assertEqual(updater.local_version(self.inst), "1.7.0")
 
 
 class QmlStaticTest(unittest.TestCase):
